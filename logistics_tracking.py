@@ -5,6 +5,7 @@ from datetime import datetime
 from tkintermapview import TkinterMapView
 import requests
 import os
+import bcrypt  # pip install bcrypt
 
 DB_CONFIG = {
     "host": "localhost",
@@ -12,10 +13,6 @@ DB_CONFIG = {
     "dbname": "logistics_tracking",
     "user": "fudge",
     "password": "FugenPG-2025",
-}
-
-VALID_CREDENTIALS = {
-    "fudgeebohr": "FudgePG-2025"
 }
 
 class LoginWindow:
@@ -30,7 +27,7 @@ class LoginWindow:
         self.password_var = tk.StringVar()
         
         self.create_login_widgets()
-    
+
     def create_login_widgets(self):
         # Title
         title_label = tk.Label(
@@ -114,20 +111,32 @@ class LoginWindow:
         username = self.username_var.get().strip()
         password = self.password_var.get().strip()
         
-        if username == "fudgeebohr" and password == "FudgePG-2025":
-            self.root.destroy()
-            self.open_main_app()
-        else:
-            messagebox.showerror("Login Failed", "Invalid username or password!")
-            self.username_var.set("")
-            self.password_var.set("")
-            self.username_var.set("")
-    
+        if not username or not password:
+            messagebox.showerror("Login Failed", "Enter username and password!")
+            return
+        
+        try:
+            conn = psycopg2.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+            cursor.execute("SELECT password_hash FROM users WHERE username = %s", (username,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result and bcrypt.checkpw(password.encode('utf-8'), result[0].encode('utf-8')):
+                self.root.destroy()
+                self.open_main_app()
+            else:
+                messagebox.showerror("Login Failed", "Invalid username or password!")
+                self.password_var.set("") 
+                self.username_var.set(username) 
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Database connection failed: {str(e)}")
+
     def open_main_app(self):
         main_window = tk.Tk()
         app = LogisticsTracking(main_window)
         main_window.mainloop()
-
 
 class LogisticsTracking:
     def __init__(self, root):
@@ -153,6 +162,10 @@ class LogisticsTracking:
             "693d05e9bbbad455253577zux511e6d"
         )
 
+        # Temporary storage for validated coordinates
+        self.temp_origin_coords = None
+        self.temp_dest_coords = None
+
         self.create_db()
         self.create_widgets()
         self.load_data()
@@ -161,6 +174,17 @@ class LogisticsTracking:
         self.conn = psycopg2.connect(**DB_CONFIG)
         self.cursor = self.conn.cursor()
 
+        # Create users table (admin user created via setup script)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create shipments table with coordinate columns
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS shipments (
                 id SERIAL PRIMARY KEY,
@@ -172,7 +196,11 @@ class LogisticsTracking:
                 shipment_date TEXT,
                 delivery_date TEXT,
                 service_type TEXT,
-                status TEXT
+                status TEXT,
+                origin_lat DECIMAL(10,8),
+                origin_lon DECIMAL(11,8),
+                dest_lat DECIMAL(10,8),
+                dest_lon DECIMAL(11,8)
             )
         """)
         self.conn.commit()
@@ -209,11 +237,14 @@ class LogisticsTracking:
         self.ServiceType = tk.StringVar()
         self.Status = tk.StringVar()
 
+        # Register validation function
+        self.register_validator = self.root.register(self.validate_address)
+
         self.create_input_field(input_frame, 'Tracking Number: ', self.TrackingNumber, 0, 0)
         self.create_input_field(input_frame, 'Customer / Recipient: ', self.Customer, 0, 2)
         self.create_input_field(input_frame, 'Shipper / Sender: ', self.Shipper, 0, 4)
-        self.create_input_field(input_frame, 'Origin Address: ', self.OriginAddress, 1, 0)
-        self.create_input_field(input_frame, 'Destination Address: ', self.DestinationAdd, 1, 2)
+        self.create_address_field(input_frame, 'Origin Address: ', self.OriginAddress, 1, 0)
+        self.create_address_field(input_frame, 'Destination Address: ', self.DestinationAdd, 1, 2)
         self.create_input_field(input_frame, 'Shipment Date: ', self.ShipmentDate, 1, 4)
         self.create_input_field(input_frame, 'Delivery Date: ', self.DeliveryDate, 2, 0)
         self.create_input_field(input_frame, 'Service Type: ', self.ServiceType, 2, 2)
@@ -349,6 +380,87 @@ class LogisticsTracking:
         entry.grid(row=row, column=col + 1, sticky='ew', padx=(0, 10), pady=8)
         parent.columnconfigure(col + 1, weight=1)
 
+    def create_address_field(self, parent, label_text, variable, row, col):
+        """Create address field with real-time geocoding validation."""
+        label = tk.Label(
+            parent,
+            text=label_text,
+            font=('Segoe UI', 10),
+            fg=self.colors['licorice'],
+            bg=self.colors['powder blue'],
+            anchor='w'
+        )
+        label.grid(row=row, column=col, sticky='w', padx=(10, 5), pady=8)
+        
+        # Create entry with real-time validation
+        entry = tk.Entry(
+            parent,
+            textvariable=variable,
+            font=('Segoe UI', 10),
+            width=25,
+            validate='key',
+            validatecommand=(self.register_validator, '%P', 'origin' if 'Origin' in label_text else 'dest')
+        )
+        entry.grid(row=row, column=col + 1, sticky='ew', padx=(0, 10), pady=8)
+        parent.columnconfigure(col + 1, weight=1)
+        
+        # Store reference for visual feedback
+        if 'Origin' in label_text:
+            entry.bind('<KeyRelease>', lambda e: self.update_address_feedback(entry, variable.get(), 'origin'))
+        else:
+            entry.bind('<KeyRelease>', lambda e: self.update_address_feedback(entry, variable.get(), 'dest'))
+
+    def validate_address(self, text, field_type):
+        """Real-time address validation - returns True to allow input."""
+        if len(text.strip()) < 3:
+            return True
+        
+        # Use threading to avoid blocking UI (simplified version)
+        self.root.after(500, lambda: self.async_geocode_and_validate(text.strip(), field_type))
+        return True
+
+    def async_geocode_and_validate(self, address, field_type):
+        """Perform geocoding asynchronously and update UI."""
+        coords = self.geocode_address(address)
+        if coords:
+            if field_type == 'origin':
+                self.temp_origin_coords = coords
+            else:
+                self.temp_dest_coords = coords
+        else:
+            if field_type == 'origin':
+                self.temp_origin_coords = None
+            else:
+                self.temp_dest_coords = None
+
+    def update_address_feedback(self, entry, address, field_type):
+        """Visual feedback for address validation status."""
+        if len(address.strip()) < 3:
+            entry.config(bg='white')
+            return
+        
+        coords = self.geocode_address(address)
+        if coords:
+            entry.config(bg='#d4edda', relief='solid', bd=2)  # Light green
+        else:
+            entry.config(bg='#f8d7da', relief='solid', bd=2)  # Light red
+
+    def geocode_address(self, address):
+        """Enhanced geocoding with caching and validation."""
+        if not address or len(address.strip()) < 3:
+            return None
+        try:
+            url = "https://geocode.maps.co/search"
+            params = {"q": address.strip(), "api_key": self.geocode_api_key, "limit": 1}
+            resp = requests.get(url, params=params, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            if data and len(data) > 0:
+                return float(data[0]["lat"]), float(data[0]["lon"])
+        except Exception as e:
+            print(f"Geocoding error for '{address}': {e}")
+        return None
+
     def load_data(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
@@ -359,25 +471,36 @@ class LogisticsTracking:
 
     def add_entry(self):
         try:
+            origin_coords = self.temp_origin_coords
+            dest_coords = self.temp_dest_coords
+            
+            if not origin_coords or not dest_coords:
+                messagebox.showerror("Error", "Please validate both addresses first (they should turn green)")
+                return
+
             self.cursor.execute("""
                 INSERT INTO shipments (
                     tracking_number, customer, shipper,
                     origin_address, destination_address,
                     shipment_date, delivery_date,
-                    service_type, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    service_type, status,
+                    origin_lat, origin_lon, dest_lat, dest_lon
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                self.TrackingNumber.get(),
-                self.Customer.get(),
-                self.Shipper.get(),
-                self.OriginAddress.get(),
-                self.DestinationAdd.get(),
-                self.ShipmentDate.get(),
-                self.DeliveryDate.get(),
-                self.ServiceType.get(),
-                self.Status.get()))
+                self.TrackingNumber.get().strip(),
+                self.Customer.get().strip(),
+                self.Shipper.get().strip(),
+                self.OriginAddress.get().strip(),
+                self.DestinationAdd.get().strip(),
+                self.ShipmentDate.get().strip(),
+                self.DeliveryDate.get().strip(),
+                self.ServiceType.get().strip(),
+                self.Status.get().strip(),
+                origin_coords[0], origin_coords[1],
+                dest_coords[0], dest_coords[1]
+            ))
             self.conn.commit()
-            messagebox.showinfo("Success", "Entry added successfully")
+            messagebox.showinfo("Success", "Entry added successfully with coordinates")
             self.clear_entry()
             self.load_data()
         except psycopg2.errors.UniqueViolation:
@@ -388,25 +511,33 @@ class LogisticsTracking:
             messagebox.showerror("Error", str(e))
 
     def update_entry(self):
-        tracking = self.TrackingNumber.get()
+        tracking = self.TrackingNumber.get().strip()
         if not tracking:
             messagebox.showerror("Error", "Enter tracking number to update")
             return
         try:
+            origin_coords = self.temp_origin_coords
+            dest_coords = self.temp_dest_coords
+            
             self.cursor.execute("""
                 UPDATE shipments
                 SET customer=%s, shipper=%s, origin_address=%s, destination_address=%s,
-                    shipment_date=%s, delivery_date=%s, service_type=%s, status=%s
+                    shipment_date=%s, delivery_date=%s, service_type=%s, status=%s,
+                    origin_lat=%s, origin_lon=%s, dest_lat=%s, dest_lon=%s
                 WHERE tracking_number=%s
             """, (
-                self.Customer.get(),
-                self.Shipper.get(),
-                self.OriginAddress.get(),
-                self.DestinationAdd.get(),
-                self.ShipmentDate.get(),
-                self.DeliveryDate.get(),
-                self.ServiceType.get(),
-                self.Status.get(),
+                self.Customer.get().strip(),
+                self.Shipper.get().strip(),
+                self.OriginAddress.get().strip(),
+                self.DestinationAdd.get().strip(),
+                self.ShipmentDate.get().strip(),
+                self.DeliveryDate.get().strip(),
+                self.ServiceType.get().strip(),
+                self.Status.get().strip(),
+                origin_coords[0] if origin_coords else None,
+                origin_coords[1] if origin_coords else None,
+                dest_coords[0] if dest_coords else None,
+                dest_coords[1] if dest_coords else None,
                 tracking))
             self.conn.commit()
             if self.cursor.rowcount > 0:
@@ -420,22 +551,24 @@ class LogisticsTracking:
             messagebox.showerror("Error", str(e))
 
     def search_entry(self):
-        tracking = self.TrackingNumber.get()
+        tracking = self.TrackingNumber.get().strip()
         if not tracking:
             messagebox.showerror("Error", "Enter tracking number to search")
             return
         self.cursor.execute("SELECT * FROM shipments WHERE tracking_number=%s", (tracking,))
         row = self.cursor.fetchone()
         if row:
-            self.Customer.set(row[2])
-            self.Shipper.set(row[3])
-            self.OriginAddress.set(row[4])
-            self.DestinationAdd.set(row[5])
-            self.ShipmentDate.set(row[6])
-            self.DeliveryDate.set(row[7])
-            self.ServiceType.set(row[8])
-            self.Status.set(row[9])
-            self.update_map(row[4], row[5])
+            self.Customer.set(row[2] or "")
+            self.Shipper.set(row[3] or "")
+            self.OriginAddress.set(row[4] or "")
+            self.DestinationAdd.set(row[5] or "")
+            self.ShipmentDate.set(row[6] or "")
+            self.DeliveryDate.set(row[7] or "")
+            self.ServiceType.set(row[8] or "")
+            self.Status.set(row[9] or "")
+            
+            # Use stored coordinates for map
+            self.update_map(row[4], row[5], row[10], row[11], row[12], row[13])
         else:
             messagebox.showerror("Error", "Tracking number not found")
 
@@ -449,14 +582,17 @@ class LogisticsTracking:
         self.DeliveryDate.set("")
         self.ServiceType.set("")
         self.Status.set("")
-        # Reset map to world view
+        self.temp_origin_coords = None
+        self.temp_dest_coords = None
+        
+        # Reset map and entry backgrounds
         self.map_widget.set_position(40.7128, -74.0060)
         self.map_widget.set_zoom(2)
         self.map_widget.delete_all_marker()
         self.map_widget.delete_all_path()
 
     def delete_entry(self):
-        tracking = self.TrackingNumber.get()
+        tracking = self.TrackingNumber.get().strip()
         if not tracking:
             messagebox.showerror("Error", "Enter tracking number to delete")
             return
@@ -467,9 +603,6 @@ class LogisticsTracking:
             self.conn.commit()
 
             if self.cursor.rowcount > 0:
-                selected = self.tree.selection()
-                for item in selected:
-                    self.tree.delete(item)
                 self.clear_entry()
                 self.load_data()
                 messagebox.showinfo("Success", "Entry deleted")
@@ -479,47 +612,28 @@ class LogisticsTracking:
             self.conn.rollback()
             messagebox.showerror("Error", str(e))
 
-    # geocode.maps.co helper
-    def geocode_address(self, address):
-        if not address:
-            return None
-        try:
-            url = "https://geocode.maps.co/search"
-            params = {"q": address, "api_key": self.geocode_api_key}
-            resp = requests.get(url, params=params, timeout=10)
-            print("GEOCODE STATUS:", resp.status_code, resp.url)  # debug
-            resp.raise_for_status()
-            data = resp.json()
-            print("GEOCODE RESULT:", data)  # debug
-            if not data:
-                return None
-            lat = float(data[0]["lat"])
-            lon = float(data[0]["lon"])
-            return lat, lon
-        except Exception as e:
-            print(f"Geocoding error for '{address}': {e}")
-            return None
-
-
-    def update_map(self, origin, destination):
-        """Update map with origin and destination markers and route using geocode.maps.co."""
+    def update_map(self, origin, destination, origin_lat=None, origin_lon=None, dest_lat=None, dest_lon=None):
+        """Update map using stored coordinates first, then fallback to geocoding."""
         try:
             # Delete existing markers and paths
             self.map_widget.delete_all_marker()
             self.map_widget.delete_all_path()
 
-            # Geocode addresses
-            origin_coords = self.geocode_address(origin)
-            destination_coords = self.geocode_address(destination)
-
-            if origin_coords is None or destination_coords is None:
-                raise ValueError("Could not geocode one or both addresses")
+            # Use stored coordinates if available
+            if origin_lat and origin_lon and dest_lat and dest_lon:
+                origin_coords = (float(origin_lat), float(origin_lon))
+                dest_coords = (float(dest_lat), float(dest_lon))
+            else:
+                origin_coords = self.geocode_address(origin)
+                dest_coords = self.geocode_address(destination)
+                if not origin_coords or not dest_coords:
+                    raise ValueError("Could not geocode addresses")
 
             origin_lat, origin_lng = origin_coords
-            dest_lat, dest_lng = destination_coords
+            dest_lat, dest_lng = dest_coords
 
-            # Set map position to origin initially
-            self.map_widget.set_position(origin_lat, origin_lng)
+            # Set map position to midpoint
+            self.map_widget.set_position((origin_lat + dest_lat) / 2, (origin_lng + dest_lng) / 2)
 
             # Add origin marker (green)
             self.map_widget.set_marker(
@@ -538,10 +652,10 @@ class LogisticsTracking:
             )
 
             # Create route between origin and destination
-            self.map_widget.set_path([origin_coords, destination_coords])
+            self.map_widget.set_path([origin_coords, dest_coords])
 
             # Fit map to show both markers
-            self.map_widget.fit_bounding_box(origin_coords, destination_coords)
+            self.map_widget.fit_bounding_box(origin_coords, dest_coords)
 
         except Exception as e:
             print(f"Map update error: {e}")
@@ -555,7 +669,6 @@ class LogisticsTracking:
                 text="Map Error - Check addresses",
                 marker_color_circle="orange"
             )
-
 
 if __name__ == "__main__":
     # Start with login window
