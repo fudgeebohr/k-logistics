@@ -19,7 +19,7 @@ class LoginWindow:
     def __init__(self, root):
         self.root = root
         self.root.title('K Logistics™ | Login')
-        self.root.geometry('700x400')
+        self.root.geometry('700x400')  # Increased height for new button
         self.root.resizable(False, False)
         self.root.configure(bg='#1d446d')
         
@@ -90,22 +90,63 @@ class LoginWindow:
         )
         password_entry.pack(side='left')
 
+        # Button frame for both buttons
+        button_frame = tk.Frame(self.root, bg='#1d446d')
+        button_frame.pack(pady=30)
+
         # Login button
         login_btn = tk.Button(
-            self.root,
-            text='LOGIN',
+            button_frame,
+            text='LOG IN',
             font=('Segoe UI', 12, 'bold'),
             bg='#9e3e1c',
             fg='#EBF2FA',
-            width=10,
+            width=12,
             height=1,
             relief='flat',
             cursor='hand2',
             command=self.validate_login
         )
-        login_btn.pack(pady=30)
+        login_btn.pack(side='left', padx=(0, 15))
+
+        # Create User button
+        create_user_btn = tk.Button(
+            button_frame,
+            text='SIGN UP',
+            font=('Segoe UI', 12, 'bold'),
+            bg='#7e6233',  # chocolate color to match theme
+            fg='#EBF2FA',
+            width=12,
+            height=1,
+            relief='flat',
+            cursor='hand2',
+            command=self.open_setup_admin
+        )
+        create_user_btn.pack(side='left')
 
         self.root.bind('<Return>', lambda e: self.validate_login())
+    
+    def open_setup_admin(self):
+        """Open the setup_admin.py GUI in a new window."""
+        try:
+            import subprocess
+            import os
+            
+            # Get the directory of the current script
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            setup_admin_path = os.path.join(current_dir, 'setup_admin.py')
+            
+            # Check if setup_admin.py exists
+            if not os.path.exists(setup_admin_path):
+                messagebox.showerror("Error", "setup_admin.py not found in the same directory!")
+                return
+            
+            # Run setup_admin.py in a new process (non-blocking)
+            subprocess.Popen(['python', setup_admin_path], 
+                           cwd=current_dir)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open Admin Setup:\n{str(e)}")
     
     def validate_login(self):
         username = self.username_var.get().strip()
