@@ -14,7 +14,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-DATABASE_URL = "postgresql://neondb_owner:npg_6CAgPpaRz3VH@ep-holy-wind-a8czb10j-pooler.eastus2.azure.neon.tech/logistics_tracking?sslmode=require&channel_binding=require"
+DATABASE_URL = "postgresql://neondb_owner:**************-holy-wind-a8czb10j-pooler.eastus2.azure.neon.tech/logistics_tracking?sslmode=require&channel_binding=require"
 
 def parse_db_url(db_url):
     """Parse PostgreSQL URI into psycopg2 params"""
